@@ -2,7 +2,6 @@
 <html>
 <head>
     <title>WASM Video Decoder</title>
-    <script src="decoder.js"></script>
     <style>
         canvas { border: 1px solid black; }
 
@@ -35,7 +34,7 @@
         </div>
         <input type="file" id="fileInput" />
     </div>
-    <script>
+    <script type="module">
         let canvas = document.getElementById('videoCanvas');
         let context = canvas.getContext('2d');
         let fps = 0;
@@ -46,58 +45,64 @@
         let requestedFrame = -1;
         let scrubbing = false;
         let displayFrame = -1;
-        let config_obj = null;
         let playing = false;
         let frameCount = 0;
         let seekBar = document.getElementById('seekbar');
         let playButton = document.getElementById('playButton');
         let num_frames = 0;
 
-        // Load WASM module
-        function onModuleLoaded() {
-            document.getElementById('fileInput').addEventListener('change', handleFileSelect, false);
-            // Draw SMTPE test bar pattern
-            const barWidth = canvas.width / 7;
-            const barHeight = canvas.height;
-            const colors = ['#000000', '#FFFFFF', '#FF0000', '#00FF00', '#0000FF', '#FFFF00', '#00FFFF'];
-            for (let i = 0; i < 7; i++) {
-                context.fillStyle = colors[i];
-                context.fillRect(i * barWidth, 0, barWidth, barHeight);
+        // This class is used to manage the wasm module
+        class VideoManager {
+            constructor(module, fileInput) {
+                // Set callback functions up for this module
+                this._module = module;
+                this._module['onFrameReady'] = this.onFrameReady.bind(this);
+                this._module['onPacketReady'] = this.onPacketReady.bind(this);
+                this._module['onVideoReachedEnd'] = this.onVideoReachedEnd.bind(this);
+
+                this.decoder = new VideoDecoder({
+                    output: this.onFrameReady.bind(this),
+                    error: (e) => console.error(e),
+                });
+                
+                fileInput.addEventListener('change', this.handleFileSelect.bind(this), false);
+                // Draw SMTPE test bar pattern
+                const barWidth = canvas.width / 7;
+                const barHeight = canvas.height;
+                const colors = ['#000000', '#FFFFFF', '#FF0000', '#00FF00', '#0000FF', '#FFFF00', '#00FFFF'];
+                for (let i = 0; i < 7; i++) {
+                    context.fillStyle = colors[i];
+                    context.fillRect(i * barWidth, 0, barWidth, barHeight);
+                }
             }
-        }
 
-        let decoder = new VideoDecoder({
-                output: onFrameReady,
-                error: (e) => console.error(e),
-            });
-
-        async function handleFileSelect(event) {
+            async handleFileSelect(event) {
             let file = event.target.files[0];
             let reader = new FileReader();
             
             // TODO: Change this to be more flexible
-            reader.onload = async function(e) {
+            reader.onload = async (e) => {
                 let data = new Uint8Array(e.target.result);
-                const imagePointer = Module._malloc(data.length);
-                Module.HEAPU8.set(data, imagePointer);
+                const imagePointer = this._module._malloc(data.length);
+                this._module.HEAPU8.set(data, imagePointer);
 
                 // allocate pointers for video data
-                const spsPointer = Module._malloc(4);
-                const spsLengthPointer = Module._malloc(4);
-                const widthPointer = Module._malloc(4);
-                const heightPointer = Module._malloc(4);
-                const numFramesPointer = Module._malloc(4);
-                const codecStringPointer = Module._malloc(80);
+                const spsPointer = this._module._malloc(4);
+                const spsLengthPointer = this._module._malloc(4);
+                const widthPointer = this._module._malloc(4);
+                const heightPointer = this._module._malloc(4);
+                const numFramesPointer = this._module._malloc(4);
+                const codecStringPointer = this._module._malloc(80);
 
-                Module._load_video(imagePointer, data.length, spsPointer, spsLengthPointer, widthPointer, heightPointer, numFramesPointer, codecStringPointer);
+                this._module._load_video(imagePointer, data.length, spsPointer, spsLengthPointer, widthPointer, heightPointer, numFramesPointer, codecStringPointer);
 
-                const sps_data_ptr = Module.HEAPU32[spsPointer >> 2];
-                const sps_pps_size = Module.HEAPU32[spsLengthPointer >> 2];
-                const width = Module.HEAPU32[widthPointer >> 2];
-                const height = Module.HEAPU32[heightPointer >> 2];
-                num_frames = Module.HEAPU32[numFramesPointer >> 2];
-                const sps = new Uint8Array(Module.HEAPU8.buffer, sps_data_ptr, sps_pps_size);
-                let codec_id = new TextDecoder().decode(new Uint8Array(Module.HEAPU8.buffer, codecStringPointer, 80));
+                const sps_data_ptr = this._module.HEAPU32[spsPointer >> 2];
+                const sps_pps_size = this._module.HEAPU32[spsLengthPointer >> 2];
+                const width = this._module.HEAPU32[widthPointer >> 2];
+                const height = this._module.HEAPU32[heightPointer >> 2];
+                num_frames = this._module.HEAPU32[numFramesPointer >> 2];
+                const sps = new Uint8Array(this._module.HEAPU8.buffer, sps_data_ptr, sps_pps_size);
+                let codec_id = new TextDecoder().decode(new Uint8Array(this._module.HEAPU8.buffer, codecStringPointer, 80));
 
                 // truncate codec_id at null character
                 const nullPos = codec_id.indexOf('\0');
@@ -105,11 +110,11 @@
                     codec_id = codec_id.substring(0, nullPos);
                 }
 
-                sps_hex = Array.from(sps).map(b => b.toString(16).padStart(2, '0'))
+                const sps_hex = Array.from(sps).map(b => b.toString(16).padStart(2, '0'))
                 // print the hex of the SPS
                 console.info("SPS: " + sps_hex.join(' '));
                 let codec_string;
-                description = sps;
+                const description = sps;
                 if (codec_id == "h264")
                 {
                     codec_string = `avc1.${sps_hex[1]}${sps_hex[2]}${sps_hex[3]}`;
@@ -129,35 +134,35 @@
                     // Format the av01 string
                     codec_string = `av01.${profile}.${level.toString().padStart(2, '0')}${tier_char}.${bit_depth.toString().padStart(2, '0')}.0`;
                 }
-                await decoder.reset();
+                await this.decoder.reset();
 
-                config_obj = {
+                let config_obj = {
                     codec: codec_string,
                     width: width,
                     height: height,
                     description: description
                 }
-                await decoder.configure(config_obj);
+                await this.decoder.configure(config_obj);
 
                 // Set canvas width+height too
                 canvas.width = width;
                 canvas.height = height;
 
                 // Free pointers
-                Module._free(sps_data_ptr);
-                Module._free(imagePointer);
-                Module._free(spsPointer);
-                Module._free(spsLengthPointer);
-                Module._free(widthPointer);
-                Module._free(heightPointer);
-                Module._free(numFramesPointer);
+                this._module._free(sps_data_ptr);
+                this._module._free(imagePointer);
+                this._module._free(spsPointer);
+                this._module._free(spsLengthPointer);
+                this._module._free(widthPointer);
+                this._module._free(heightPointer);
+                this._module._free(numFramesPointer);
 
                 console.info("Video loaded, number of frames: " + num_frames);
                 seekBar.max = num_frames; // Set the max value of the seekbar
 
                 // Get the first packet
                 requestedFrame = 0;
-                Module._get_packet(0, 0);
+                this._module._get_packet(0, 0);
 
                 // enable the seekbar handling
                 let seekTimeout = null;
@@ -179,18 +184,18 @@
 
                 playButton.addEventListener('click', async () => {
                     // Just let the video rip, seek to the position, then hit play
-                    Module._get_packet(displayFrame, 0x0)
+                    this._module._get_packet(displayFrame, 0x0)
                     startTime = Date.now();
                     frameCount = 0
                     playing = true;
-                    Module._play_video(displayFrame, 1);
+                    this._module._play_video(displayFrame, 1);
                 });
 
-                seekBar.addEventListener('input', function() {
+                seekBar.addEventListener('input', async () => {
                     let seekFunctor = () => {                
                         console.info("Commanding seek to frame: " + seekBar.value);    
                         requestedFrame = parseInt(seekBar.value);
-                        Module._get_packet(requestedFrame, 0x1);
+                        this._module._get_packet(requestedFrame, 0x1);
                     }
                     seeks.push(seekFunctor);
                     if (seekTimeout == null) {
@@ -206,8 +211,8 @@
                 seekBar.addEventListener("mouseup", async () => {
                     // Clear any pending seeks
                     scrubbing = false;
-                    await decoder.reset();
-                    await decoder.configure(config_obj);
+                    await this.decoder.reset();
+                    await this.decoder.configure(config_obj);
                     seeks = [];
 
                     seekBar.value = displayFrame;
@@ -220,21 +225,22 @@
             event.target.value = '';
         }
 
-        function onVideoReachedEnd()
+        onVideoReachedEnd()
         {
             console.info("Video reached end");
         }
 
-        function onPacketReady(packet, frameLower, frameUpper, is_keyframe) {
+        onPacketReady(packet, frameLower, frameUpper, is_keyframe) {
             const frame = (frameUpper << 32) | frameLower;
             let chunk = new EncodedVideoChunk({
                 type: is_keyframe ? 'key' : 'delta',
                 timestamp: frame,
                 data: packet,
             });
-            decoder.decode(chunk);
+            this.decoder.decode(chunk);
         }
-        async function onFrameReady(rgbArray) {
+
+        async onFrameReady(rgbArray) {
             const width = rgbArray.displayWidth;
             const height = rgbArray.displayHeight;
             //let imageData = context.createImageData(rgbArray.width, rgbArray.height);
@@ -281,14 +287,14 @@
             //    await decoder.reset();
             //}
         }
+    }
 
-
-        Module.onRuntimeInitialized = async function() {
-            // Bind the onFrameReady function to the WASM module
-            Module['onFrameReady'] = onFrameReady;
+        // Import WASM
+        import {default as Module} from './avcodec.js';
+        Module().then((instance) => {
             // Initialize WASM module
-            onModuleLoaded();
-        };
+            let manager = new VideoManager(instance, document.getElementById('fileInput'));
+        });
     </script>
 </body>
 </html>
